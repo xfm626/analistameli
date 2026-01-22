@@ -1,6 +1,6 @@
 {
   "name": "analista-meli-nextjs-scrape",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",
-    "next": "15.1.6",
+    "next": "^15.2.0",
     "react": "19.0.0",
     "react-dom": "19.0.0"
   },
@@ -20,7 +20,7 @@
     "@types/react-dom": "^18.2.22",
     "autoprefixer": "^10.4.19",
     "eslint": "^9.5.0",
-    "eslint-config-next": "15.1.6",
+    "eslint-config-next": "^15.2.0",
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.4",
     "typescript": "^5.5.4"
