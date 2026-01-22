@@ -1,38 +1,40 @@
 # Analista MeLI
 
-Esta app **NO usa la API oficial** de MercadoLibre. En su lugar:
-- hace un **fetch del HTML** del listado (ej: `https://listado.mercadolibre.com.ar/auricular`)
-- y extrae productos con `cheerio`.
+Esta versión usa **MercadoLibre API oficial** con **OAuth (Authorization Code)** para evitar bloqueos anti-bot típicos del scraping server-side.
 
-## Advertencia importante (realista)
-Este enfoque **puede ser bloqueado** por medidas anti-bot (403/Access Denied/Captcha), especialmente en entornos serverless (Vercel).
-Tampermonkey suele funcionar mejor porque corre **dentro del navegador** en el sitio de MercadoLibre.
+## 1) Configurar variables de entorno (local)
+1. Copiá `.env.example` a `.env.local`
+2. Completá:
+- `MELI_CLIENT_ID` (App ID)
+- `MELI_CLIENT_SECRET`
+- `MELI_REDIRECT_URI` = `http://localhost:3000/api/auth/callback`
+- `MELI_SITE_ID` = `MLA`
 
-## Localhost
+## 2) Ejecutar
 ```bash
 npm install
 npm run dev
 ```
-Abrí http://localhost:3000
 
-## Deploy en Vercel
-- Subí a GitHub
-- Importá en Vercel (Next.js detectado automáticamente)
+## 3) Hacer OAuth y obtener refresh_token
+1. Abrí en el navegador:
+   - `http://localhost:3000/api/auth/start`
+2. Iniciá sesión y aceptá permisos.
+3. Te redirige a `/api/auth/callback` y te muestra el `refresh_token`.
+4. Copiá ese `refresh_token` y pegalo en `.env.local` como `MELI_REFRESH_TOKEN`.
+5. Reiniciá el server (Ctrl+C y `npm run dev`).
 
-## Notas de estabilidad
-Si te devuelve "Bloqueo anti-bot detectado" o no extrae productos:
-- probá otra red / IP
-- probá consultas más generales
-- o considerá volver a opción A (Tampermonkey) para estabilidad.
+## 4) Deploy en Vercel
+En Vercel → Project → Settings → Environment Variables, cargá:
+- `MELI_CLIENT_ID`
+- `MELI_CLIENT_SECRET`
+- `MELI_REDIRECT_URI` = `https://TU-DOMINIO.vercel.app/api/auth/callback`
+- `MELI_SITE_ID` = `MLA`
+- `MELI_REFRESH_TOKEN`
 
+Redeploy.
 
-## Campos adicionales (best-effort)
-La UI muestra `Vendedor` y `Vendidos` cuando el HTML del listado los incluye. En algunos listados MercadoLibre no expone esos datos en la tarjeta y pueden aparecer como `—`.
+## Notas
+- La app ordena por “más vendido” usando `sold_quantity` cuando está disponible.
+- Si el endpoint `/sites/{site_id}/search` te devuelve 403, revisá políticas/limitaciones y considerá endpoints alternativos de usuario.
 
-
-## Selector Top (10/20/100/Ver todo)
-Podés elegir Top 10, Top 20, Top 100 o Ver todo (hasta 200 por estabilidad). La app ordena por `Vendidos` (cuando el HTML lo incluye).
-
-
-## Nota sobre status 200 sin resultados
-A veces MercadoLibre devuelve HTTP 200 con un HTML "shell" (sin cards) y renderiza resultados con JavaScript en el cliente, o aplica bloqueo silencioso. En ese caso la API `/api/search` intenta extraer desde JSON embebido; si no existe, puede fallar.

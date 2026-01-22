@@ -1,17 +1,8 @@
 import { NextResponse } from "next/server";
-import { scrapeProductsFromHtml } from "@/lib/scrape";
-import { scrapeProductsFromEmbeddedJson } from "@/lib/scrapeEmbedded";
+import { getAccessToken } from "@/lib/meliToken";
 import type { Product } from "@/lib/types";
 
 export const runtime = "nodejs";
-
-function looksLikeListing(html: string) {
-  return /ui-search-result__wrapper|poly-card|andes-money-amount/i.test(html);
-}
-
-function looksLikeHardBlock(html: string) {
-  return /access denied|forbidden|captcha|recaptcha|robot check|unusual traffic/i.test(html);
-}
 
 function clampLimit(n: number) {
   if (n === 0) return 0; // ver todo
@@ -21,25 +12,22 @@ function clampLimit(n: number) {
   return 100;
 }
 
-function buildUrl(slug: string, desde: number) {
-  return desde <= 1
-    ? `https://listado.mercadolibre.com.ar/${encodeURIComponent(slug)}`
-    : `https://listado.mercadolibre.com.ar/${encodeURIComponent(slug)}_Desde_${desde}`;
-}
+function mapApiResultToProduct(item: any, idx: number): Product {
+  const price = Number(item?.price || 0);
+  const sold = Number.isFinite(Number(item?.sold_quantity)) ? Number(item.sold_quantity) : undefined;
 
-async function fetchHtml(url: string) {
-  const r = await fetch(url, {
-    cache: "no-store",
-    redirect: "follow",
-    headers: {
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "accept-language": "es-AR,es;q=0.9,en;q=0.8",
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    },
-  });
-  const html = await r.text();
-  return { r, html };
+  return {
+    id: String(item?.permalink || item?.id || `${idx}`),
+    rank: idx + 1,
+    title: String(item?.title || "Producto"),
+    price: Number.isFinite(price) ? price : 0,
+    img: String(item?.thumbnail || ""),
+    isFull: item?.shipping?.logistic_type === "fulfillment",
+    link: String(item?.permalink || ""),
+    sellerName: item?.seller?.nickname || undefined,
+    soldQty: sold,
+    soldText: sold !== undefined ? `${sold.toLocaleString("es-AR")} vendidos` : undefined,
+  };
 }
 
 export async function GET(req: Request) {
@@ -50,96 +38,66 @@ export async function GET(req: Request) {
 
   if (!q) return NextResponse.json({ ok: false, error: "Falta q" }, { status: 400 });
 
-  const slug = q.replace(/\s+/g, "-");
+  const siteId = process.env.MELI_SITE_ID || "MLA";
 
-  // Por estabilidad: "Ver todo" = máximo 200 (4 páginas de 50).
-  const hardMax = limit === 0 ? 200 : limit;
-  const pageSize = 50;
-  const maxPages = Math.ceil(hardMax / pageSize);
-
-  const productsMap = new Map<string, Product>();
-  let lastUpstreamStatus: number | undefined = undefined;
-  let lastUrl = "";
-
+  let accessToken = "";
   try {
-    for (let page = 0; page < maxPages; page++) {
-      const desde = page * pageSize + 1;
-      const listingUrl = buildUrl(slug, desde);
-      lastUrl = listingUrl;
+    const t = await getAccessToken();
+    accessToken = t.accessToken;
+  } catch (e: any) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Falta configurar OAuth de MercadoLibre (token).",
+        detail: e?.message || String(e),
+        hint: "Abrí /api/auth/start para autorizar y luego guardá MELI_REFRESH_TOKEN en .env.local / Vercel.",
+      },
+      { status: 500 }
+    );
+  }
 
-      const { r, html } = await fetchHtml(listingUrl);
-      lastUpstreamStatus = r.status;
+  const perPage = limit === 0 ? 50 : Math.min(limit, 50);
+  const hardMax = limit === 0 ? 200 : limit;
+  const maxPages = Math.ceil(hardMax / perPage);
 
-      const hasListing = looksLikeListing(html);
+  const products: Product[] = [];
 
-      // Bloqueo duro
-      if (!hasListing && looksLikeHardBlock(html)) {
-        return NextResponse.json(
-          { ok: false, error: "Bloqueo anti-bot detectado", status: r.status, url: listingUrl, detail: html.slice(0, 900) },
-          { status: 502 }
-        );
-      }
+  for (let page = 0; page < maxPages; page++) {
+    const offset = page * perPage;
+    const url = new URL(`https://api.mercadolibre.com/sites/${siteId}/search`);
+    url.searchParams.set("q", q);
+    url.searchParams.set("limit", String(perPage));
+    url.searchParams.set("offset", String(offset));
 
-      // Intento 1: cards HTML
-      let pageProducts = scrapeProductsFromHtml(html, "https://www.mercadolibre.com.ar/");
+    const r = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
 
-      // Intento 2: JSON embebido
-      if (pageProducts.length === 0) {
-        pageProducts = scrapeProductsFromEmbeddedJson(html);
-      }
+    const data = await r.json().catch(() => null);
 
-      // Si no hay data y status no OK => error.
-      if (!r.ok && pageProducts.length === 0) {
-        return NextResponse.json(
-          { ok: false, error: "MercadoLibre bloqueó o falló la respuesta", status: r.status, url: listingUrl, detail: html.slice(0, 900) },
-          { status: 502 }
-        );
-      }
-
-      // Si no hay data, cortamos paginación.
-      if (pageProducts.length === 0) break;
-
-      for (const p of pageProducts) {
-        const key = p.id || p.link;
-        if (!productsMap.has(key)) productsMap.set(key, p);
-      }
-
-      if (productsMap.size >= hardMax) break;
-    }
-
-    const products = Array.from(productsMap.values());
-
-    if (products.length === 0) {
+    if (!r.ok) {
       return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "No se pudieron extraer productos. MercadoLibre devolvió una página sin resultados visibles para scraping (renderizado por JS o bloqueo silencioso).",
-          status: lastUpstreamStatus,
-          url: lastUrl || buildUrl(slug, 1),
-        },
+        { ok: false, error: "Error consultando MercadoLibre API", status: r.status, url: url.toString(), detail: data },
         { status: 502 }
       );
     }
 
-    const sorted = [...products].sort((a, b) => (b.soldQty || 0) - (a.soldQty || 0));
-    const sliced = (limit === 0 ? sorted.slice(0, hardMax) : sorted.slice(0, limit)).map((p, idx) => ({ ...p, rank: idx + 1 }));
+    const results = Array.isArray((data as any)?.results) ? (data as any).results : [];
+    if (results.length === 0) break;
 
-    return NextResponse.json({
-      ok: true,
-      q,
-      products: sliced,
-      source: "html-scrape+embedded-json",
-      url: buildUrl(slug, 1),
-      upstreamStatus: lastUpstreamStatus,
-      requestedLimit: limitParam,
-      appliedLimit: limit,
-      totalFound: products.length,
-    });
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: "Error de red haciendo scraping", detail: e?.message || String(e), url: lastUrl || buildUrl(slug, 1) },
-      { status: 502 }
-    );
+    for (let i = 0; i < results.length; i++) {
+      products.push(mapApiResultToProduct(results[i], products.length));
+      if (products.length >= hardMax) break;
+    }
+
+    if (products.length >= hardMax) break;
+    if (results.length < perPage) break;
   }
+
+  const sorted = [...products]
+    .sort((a, b) => (b.soldQty || 0) - (a.soldQty || 0))
+    .map((p, idx) => ({ ...p, rank: idx + 1 }));
+
+  return NextResponse.json({ ok: true, q, products: sorted, source: "meli-api", siteId, appliedLimit: limit, total: sorted.length });
 }
