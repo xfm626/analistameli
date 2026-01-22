@@ -32,3 +32,7 @@ La UI muestra `Vendedor` y `Vendidos` cuando el HTML del listado los incluye. En
 
 ## Selector Top (10/20/100/Ver todo)
 Podés elegir Top 10, Top 20, Top 100 o Ver todo (hasta 200 por estabilidad). La app ordena por `Vendidos` (cuando el HTML lo incluye).
+
+
+## Nota sobre status 200 sin resultados
+A veces MercadoLibre devuelve HTTP 200 con un HTML "shell" (sin cards) y renderiza resultados con JavaScript en el cliente, o aplica bloqueo silencioso. En ese caso la API `/api/search` intenta extraer desde JSON embebido; si no existe, puede fallar.

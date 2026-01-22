@@ -1,11 +1,16 @@
 import { NextResponse } from "next/server";
 import { scrapeProductsFromHtml } from "@/lib/scrape";
+import { scrapeProductsFromEmbeddedJson } from "@/lib/scrapeEmbedded";
 import type { Product } from "@/lib/types";
 
 export const runtime = "nodejs";
 
 function looksLikeListing(html: string) {
   return /ui-search-result__wrapper|poly-card|andes-money-amount/i.test(html);
+}
+
+function looksLikeHardBlock(html: string) {
+  return /access denied|forbidden|captcha|recaptcha|robot check|unusual traffic/i.test(html);
 }
 
 function clampLimit(n: number) {
@@ -67,21 +72,31 @@ export async function GET(req: Request) {
 
       const hasListing = looksLikeListing(html);
 
-      if (!hasListing && /forbidden|access denied|captcha|robot/i.test(html)) {
+      // Bloqueo duro
+      if (!hasListing && looksLikeHardBlock(html)) {
         return NextResponse.json(
           { ok: false, error: "Bloqueo anti-bot detectado", status: r.status, url: listingUrl, detail: html.slice(0, 900) },
           { status: 502 }
         );
       }
 
-      if (!hasListing && !r.ok) {
+      // Intento 1: cards HTML
+      let pageProducts = scrapeProductsFromHtml(html, "https://www.mercadolibre.com.ar/");
+
+      // Intento 2: JSON embebido
+      if (pageProducts.length === 0) {
+        pageProducts = scrapeProductsFromEmbeddedJson(html);
+      }
+
+      // Si no hay data y status no OK => error.
+      if (!r.ok && pageProducts.length === 0) {
         return NextResponse.json(
           { ok: false, error: "MercadoLibre bloqueó o falló la respuesta", status: r.status, url: listingUrl, detail: html.slice(0, 900) },
           { status: 502 }
         );
       }
 
-      const pageProducts = scrapeProductsFromHtml(html, "https://www.mercadolibre.com.ar/");
+      // Si no hay data, cortamos paginación.
       if (pageProducts.length === 0) break;
 
       for (const p of pageProducts) {
@@ -93,14 +108,20 @@ export async function GET(req: Request) {
     }
 
     const products = Array.from(productsMap.values());
+
     if (products.length === 0) {
       return NextResponse.json(
-        { ok: false, error: "No se pudieron extraer productos (cambió el HTML o hubo bloqueo).", status: lastUpstreamStatus, url: lastUrl },
+        {
+          ok: false,
+          error:
+            "No se pudieron extraer productos. MercadoLibre devolvió una página sin resultados visibles para scraping (renderizado por JS o bloqueo silencioso).",
+          status: lastUpstreamStatus,
+          url: lastUrl || buildUrl(slug, 1),
+        },
         { status: 502 }
       );
     }
 
-    // Ordenar por "más vendido" (soldQty desc). Si no existe, cae al final.
     const sorted = [...products].sort((a, b) => (b.soldQty || 0) - (a.soldQty || 0));
     const sliced = (limit === 0 ? sorted.slice(0, hardMax) : sorted.slice(0, limit)).map((p, idx) => ({ ...p, rank: idx + 1 }));
 
@@ -108,7 +129,7 @@ export async function GET(req: Request) {
       ok: true,
       q,
       products: sliced,
-      source: "html-scrape",
+      source: "html-scrape+embedded-json",
       url: buildUrl(slug, 1),
       upstreamStatus: lastUpstreamStatus,
       requestedLimit: limitParam,
